@@ -1,0 +1,16 @@
+{
+  "name": "inspiration-test",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "build:sdk": "npm --prefix sdk run build",
+    "check:sdk": "npm --prefix sdk run check"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^5.9.0"
+  }
+}
