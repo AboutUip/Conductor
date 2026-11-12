@@ -27,3 +27,11 @@ export type TaskId = string & { readonly [taskIdBrand]: true };
 export function isTaskId(value: string): value is TaskId {
     return /^_[0-9a-z]{0,7}$/.test(value);
 }
+
+/** 类型:算法类型 */
+export enum SchedulingType{
+    // 累计调度：基础 tick 取任务间隔的最大公约数。
+    LeastCommonMultiple = "LeastCommonMultiple",
+    // 时间轮调度。
+    TimingWheel = "TimingWheel"
+}

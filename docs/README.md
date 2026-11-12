@@ -11,6 +11,7 @@ import {
   IntervalAccumulatorMap,
   isIntervalId,
   isTaskId,
+  SchedulingType,
   Task,
   TaskScheduler,
 } from '../sdk/src/index.js';
@@ -24,7 +25,7 @@ import type {
 构建后的 SDK 使用 CommonJS：
 
 ```js
-const { Task, TaskScheduler } = require('@inspiration/task-scheduler');
+const { SchedulingType, Task, TaskScheduler } = require('@inspiration/task-scheduler');
 ```
 
 ## 快速开始
@@ -51,6 +52,25 @@ scheduler.resume();
 setTimeout(() => scheduler.kill(), 5000);
 ```
 
+时间轮模式使用 `SchedulingType.TimingWheel`：
+
+```ts
+import { SchedulingType, Task, TaskScheduler } from '../sdk/src/index.js';
+
+const scheduler = new TaskScheduler(1000, SchedulingType.TimingWheel);
+const task = new Task('cleanup', '定期清理缓存');
+
+task.bindSyncCallback(() => {
+  console.log('清理缓存');
+}, { arguments: [] });
+
+scheduler.addTask(task, 750);
+scheduler.resume();
+
+// 使用完毕后停止计时器，避免阻止 Node.js 进程退出。
+setTimeout(() => scheduler.kill(), 5000);
+```
+
 ## `Task`
 
 表示一组在同一调度周期中一起派发的同步和异步回调。
@@ -74,16 +94,16 @@ new Task(name: string, description: string, existingTaskIds?: Set<TaskId> | null
 | `name` | `string` | 任务名称，只读。 |
 | `description` | `string` | 任务描述，只读。 |
 | `id` | `TaskId` | 任务 ID，只读。 |
-| `syncCallbacks` | `Array<(...args: any[]) => any>` | 已绑定的同步回调列表。 |
-| `syncArguments` | `any[][]` | 与同步回调对应的参数列表。 |
-| `syncThisArgs` | `unknown[]` | 与同步回调对应的 `this` 接收者。 |
-| `syncErrorHandlers` | `Array<(error: Error) => void>` | 与同步回调对应的错误处理器。 |
-| `asyncCallbacks` | `Array<(...args: any[]) => Promise<any>>` | 已绑定的异步回调列表。 |
-| `asyncArguments` | `any[][]` | 与异步回调对应的参数列表。 |
-| `asyncThisArgs` | `unknown[]` | 与异步回调对应的 `this` 接收者。 |
-| `asyncErrorHandlers` | `Array<(error: Error) => void>` | 与异步回调对应的错误处理器。 |
+| `syncCallbacks` | `ReadonlyArray<(...args: any[]) => any>` | 已绑定同步回调的只读快照。 |
+| `syncArguments` | `ReadonlyArray<ReadonlyArray<any>>` | 同步回调实参的只读快照；内层实参数组也会复制。 |
+| `syncThisArgs` | `ReadonlyArray<unknown>` | 同步回调 `this` 接收者的只读快照。 |
+| `syncErrorHandlers` | `ReadonlyArray<(error: Error) => void>` | 同步回调错误处理器的只读快照。 |
+| `asyncCallbacks` | `ReadonlyArray<(...args: any[]) => Promise<any>>` | 已绑定异步回调的只读快照。 |
+| `asyncArguments` | `ReadonlyArray<ReadonlyArray<any>>` | 异步回调实参的只读快照；内层实参数组也会复制。 |
+| `asyncThisArgs` | `ReadonlyArray<unknown>` | 异步回调 `this` 接收者的只读快照。 |
+| `asyncErrorHandlers` | `ReadonlyArray<(error: Error) => void>` | 异步回调错误处理器的只读快照。 |
 
-回调列表及其配套数组提供 getter 和 setter，返回或替换的是内部数组。直接修改时必须保持各数组索引对应；一般应使用绑定方法注册回调。
+上述属性仅提供 getter，返回的都是快照；修改快照不会影响任务内部状态。使用 `bindSyncCallback()` 和 `bindAsyncCallback()` 注册回调，使用 `removeSyncCallback()` 和 `removeAsyncCallback()` 按索引安全移除回调及其配套数据。
 
 ### `TaskOptions`
 
@@ -131,6 +151,14 @@ task.bindAsyncCallback(
 );
 ```
 
+#### `removeSyncCallback(index): boolean`
+
+移除指定索引的同步回调及其参数、`this` 接收者、错误处理器和一次性标记。索引无效时返回 `false`，移除成功时返回 `true`。
+
+#### `removeAsyncCallback(index): boolean`
+
+移除指定索引的异步回调及其参数、`this` 接收者、错误处理器和一次性标记。索引无效时返回 `false`，移除成功时返回 `true`。
+
 #### `runSyncCallbacks(): boolean`
 
 立即按绑定顺序执行同步回调。执行完成后返回 `true`。
@@ -153,15 +181,23 @@ task.bindAsyncCallback(
 
 ## `TaskScheduler`
 
-按毫秒间隔派发任务。多个任务可以注册在同一个间隔。调度器用基础 tick 和已注册间隔的最大公约数协调周期；新增间隔时会重新校准，并重置间隔累计时间。
+按毫秒间隔派发任务。多个任务可以注册在同一个间隔。调度器支持两种调度模式，由 `SchedulingType` 指定。
 
 ### 构造函数
 
 ```ts
-new TaskScheduler(baseIntervalMs?: number)
+new TaskScheduler(baseIntervalMs?: number, schedulingType?: SchedulingType)
 ```
 
-`baseIntervalMs` 是初始基础 tick，默认 `1000` 毫秒。请传入正整数；构造函数本身不校验该值。构造时会创建内部计时器，但调度器初始处于暂停状态；计时器仍可能阻止 Node.js 进程退出，因此完成后应调用 `kill()`。
+- `baseIntervalMs`：初始基础 tick，默认 `1000` 毫秒。也作为 `addTask()` 省略间隔时的默认值。构造函数不校验该值。
+- `schedulingType`：调度模式，默认 `SchedulingType.LeastCommonMultiple`。
+
+| 模式 | 说明 |
+|---|---|
+| `SchedulingType.LeastCommonMultiple` | 累计模式。根据基础 tick 与任务间隔的最大公约数选择 tick；新增间隔后重新校准，并重置已累计时间。 |
+| `SchedulingType.TimingWheel` | 时间轮模式。根据任务的剩余间隔安排一次性计时器；最近的间隔到期后再安排下一次计时。 |
+
+调度器初始处于暂停状态。累计模式在构造时创建内部计时器；时间轮模式在恢复且存在任务时才安排计时。完成后调用 `kill()`，避免计时器阻止 Node.js 进程退出。
 
 ### 方法
 
@@ -189,11 +225,11 @@ const id = scheduler.addTask(task, 1000);
 
 #### `pause(): void`
 
-暂停后续 tick 处理和任务派发。暂停期间不累计时间，错过的周期不会在恢复时补发。已经启动的异步回调不会被取消。
+暂停后续计时处理和任务派发。累计模式暂停期间不累计 tick；时间轮模式会清除待执行的计时器。恢复时不会补发暂停期间错过的周期。已经启动的异步回调不会被取消。
 
 #### `resume(): void`
 
-恢复 tick 处理和任务派发。调度器初始暂停；调用 `kill()` 停止后，也可以再次调用 `resume()` 重启。
+恢复计时处理和任务派发。调度器初始暂停；调用 `kill()` 停止后，也可以再次调用 `resume()` 重启。时间轮模式会按已记录的最近剩余间隔重新安排计时。
 
 #### `kill(): void`
 
@@ -227,7 +263,7 @@ const id = scheduler.addTask(task, 1000);
 
 ## `IntervalAccumulatorMap`
 
-底层工具类，继承自 `Map<number, IntervalId>`，并为间隔维护已累计的毫秒数。常规调度使用 `TaskScheduler` 即可；直接使用时，应通过扩展方法同步维护累计状态。
+底层工具类，继承自 `Map<number, IntervalId>`，并为间隔维护累计时间或剩余时间。常规调度使用 `TaskScheduler` 即可；直接使用时，应通过扩展方法同步维护时间状态。
 
 ### 构造函数
 
@@ -235,18 +271,22 @@ const id = scheduler.addTask(task, 1000);
 new IntervalAccumulatorMap(entries?: Iterable<readonly [number, IntervalId]> | null)
 ```
 
-传入构造函数的条目会写入 `Map`，但不会初始化对应的累计时间；需要参与累计的条目应使用 `setWithElapsedTime()` 添加。
+传入构造函数的条目会写入 `Map`，但不会初始化对应的累计时间或剩余时间；需要参与调度的条目应使用下列扩展方法添加。
 
 ### 方法
 
 - `setWithElapsedTime(intervalMs, intervalId): void`：写入映射并将该间隔的累计时间设为零。
-- `deleteWithElapsedTime(intervalMs): boolean`：删除映射和累计状态；当前实现调用后始终返回 `true`。
+- `setWithOriginalTime(intervalMs, intervalId): void`：写入映射并将该间隔的剩余时间初始化为其间隔值，供时间轮模式使用。
+- `deleteWithTotalTime(intervalMs): boolean`：删除映射和累计状态；当前实现调用后始终返回 `true`。
 - `advanceElapsedTime(tickIntervalMs): number[]`：为所有已跟踪间隔累加一个 tick，返回本次恰好到期的间隔，并将其累计时间归零。
+- `getMinDiffTime(): number`：返回所有时间轮间隔中的最小剩余时间；没有已跟踪的时间轮间隔时返回 `Infinity`。
+- `advanceOriginalTime(minDelay): number[]`：从所有时间轮间隔的剩余时间中扣除 `minDelay`，返回本次到期的间隔，并将其剩余时间重置为原间隔。
 - `resetElapsedTime(): void`：将所有已跟踪间隔的累计时间归零。
 
 ## 行为说明
 
 - 间隔和 tick 的单位均为毫秒。
-- 增加新间隔会触发重新校准；重新校准过程中会清零已有间隔的累计时间。
+- Node.js 计时器受事件循环调度影响，实际派发时间可能晚于目标间隔。
+- 累计模式增加新间隔会触发重新校准；重新校准过程中会清零已有间隔的累计时间。
 - 暂停或停止调度器不会撤销已派发的异步工作。
 - 各回调独立处理错误；默认错误处理器会将错误写入 `console.error`。

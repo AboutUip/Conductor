@@ -41,39 +41,32 @@ export class Task {
     get id(): TaskId { return this.#id; }
     /** 任务描述。 */
     get description(): string { return this.#description; }
-    /** 已绑定的同步回调。 */
-    get syncCallbacks(): Array<(...args: any[]) => any> { return this.#syncCallbacks; }
-    /** 同步回调对应的实参列表。 */
-    get syncArguments(): any[][] { return this.#syncArguments; }
-    /** 同步回调对应的 this 接收者。 */
-    get syncThisArgs(): unknown[] { return this.#syncThisArgs; }
-    /** 同步回调对应的错误处理器。 */
-    get syncErrorHandlers(): Array<(error: Error) => void> { return this.#syncErrorHandlers; }
-    /** 已绑定的异步回调。 */
-    get asyncCallbacks(): Array<(...args: any[]) => Promise<any>> { return this.#asyncCallbacks; }
-    /** 异步回调对应的实参列表。 */
-    get asyncArguments(): any[][] { return this.#asyncArguments; }
-    /** 异步回调对应的 this 接收者。 */
-    get asyncThisArgs(): unknown[] { return this.#asyncThisArgs; }
-    /** 异步回调对应的错误处理器。 */
-    get asyncErrorHandlers(): Array<(error: Error) => void> { return this.#asyncErrorHandlers; }
-
-    /** 替换已绑定的同步回调列表。 */
-    set syncCallbacks(callbacks: Array<(...args: any[]) => any>) { this.#syncCallbacks = callbacks; }
-    /** 替换同步回调的实参列表。 */
-    set syncArguments(args: any[][]) { this.#syncArguments = args; }
-    /** 替换同步回调的 this 接收者列表。 */
-    set syncThisArgs(thisArgs: unknown[]) { this.#syncThisArgs = thisArgs; }
-    /** 替换同步回调的错误处理器列表。 */
-    set syncErrorHandlers(handlers: Array<(error: Error) => void>) { this.#syncErrorHandlers = handlers; }
-    /** 替换已绑定的异步回调列表。 */
-    set asyncCallbacks(callbacks: Array<(...args: any[]) => Promise<any>>) { this.#asyncCallbacks = callbacks; }
-    /** 替换异步回调的实参列表。 */
-    set asyncArguments(args: any[][]) { this.#asyncArguments = args; }
-    /** 替换异步回调的 this 接收者列表。 */
-    set asyncThisArgs(thisArgs: unknown[]) { this.#asyncThisArgs = thisArgs; }
-    /** 替换异步回调的错误处理器列表。 */
-    set asyncErrorHandlers(handlers: Array<(error: Error) => void>) { this.#asyncErrorHandlers = handlers; }
+    /** 已绑定同步回调的只读快照。 */
+    get syncCallbacks(): ReadonlyArray<(...args: any[]) => any> { return [...this.#syncCallbacks]; }
+    /** 同步回调实参的只读快照，包含复制后的实参数组。 */
+    get syncArguments(): ReadonlyArray<ReadonlyArray<any>> {
+        return this.#syncArguments.map((args) => [...args]);
+    }
+    /** 同步回调 this 接收者的只读快照。 */
+    get syncThisArgs(): ReadonlyArray<unknown> { return [...this.#syncThisArgs]; }
+    /** 同步回调错误处理器的只读快照。 */
+    get syncErrorHandlers(): ReadonlyArray<(error: Error) => void> {
+        return [...this.#syncErrorHandlers];
+    }
+    /** 已绑定异步回调的只读快照。 */
+    get asyncCallbacks(): ReadonlyArray<(...args: any[]) => Promise<any>> {
+        return [...this.#asyncCallbacks];
+    }
+    /** 异步回调实参的只读快照，包含复制后的实参数组。 */
+    get asyncArguments(): ReadonlyArray<ReadonlyArray<any>> {
+        return this.#asyncArguments.map((args) => [...args]);
+    }
+    /** 异步回调 this 接收者的只读快照。 */
+    get asyncThisArgs(): ReadonlyArray<unknown> { return [...this.#asyncThisArgs]; }
+    /** 异步回调错误处理器的只读快照。 */
+    get asyncErrorHandlers(): ReadonlyArray<(error: Error) => void> {
+        return [...this.#asyncErrorHandlers];
+    }
 
     /**
      * 创建任务并生成或分配唯一 ID。
@@ -139,6 +132,38 @@ export class Task {
         if (options.once === true) this.#asyncOnceIndices.add(this.#asyncCallbacks.length - 1);
     }
 
+    /** 移除指定索引的同步回调及其配套数据。 */
+    removeSyncCallback(index: number): boolean {
+        if (!Number.isInteger(index) || index < 0 || index >= this.#syncCallbacks.length) return false;
+        this.#removeSyncCallback(index);
+        return true;
+    }
+
+    /** 移除指定索引的异步回调及其配套数据。 */
+    removeAsyncCallback(index: number): boolean {
+        if (!Number.isInteger(index) || index < 0 || index >= this.#asyncCallbacks.length) return false;
+        this.#removeAsyncCallback(index);
+        return true;
+    }
+
+    /** 调用错误处理器；若处理器自身失败，将处理器错误和原始错误写入日志。 */
+    #handleCallbackError(errorHandler: (error: Error) => void, error: unknown): void {
+        const taskError = error instanceof Error ? error : new Error(String(error));
+        try {
+            errorHandler(taskError);
+        } catch (handlerError) {
+            const reportedError = handlerError instanceof Error
+                ? handlerError
+                : new Error(String(handlerError));
+            console.error(
+                `Task ${this.#name} error handler failed:`,
+                reportedError,
+                'Original callback error:',
+                taskError
+            );
+        }
+    }
+
     /** 运行全部同步回调；单个回调的异常交由其错误处理器处理。 */
     runSyncCallbacks(): boolean {
         let index = 0;
@@ -154,8 +179,7 @@ export class Task {
             try {
                 Reflect.apply(callback, thisArg, args);
             } catch (error) {
-                const taskError = error instanceof Error ? error : new Error(String(error));
-                errorHandler(taskError);
+                this.#handleCallbackError(errorHandler, error);
             }
             if (!isOnce) index++;
         }
@@ -177,12 +201,10 @@ export class Task {
 
             try {
                 Promise.resolve(Reflect.apply(callback, thisArg, args)).catch((error) => {
-                    const taskError = error instanceof Error ? error : new Error(String(error));
-                    errorHandler(taskError);
+                    this.#handleCallbackError(errorHandler, error);
                 });
             } catch (error) {
-                const taskError = error instanceof Error ? error : new Error(String(error));
-                errorHandler(taskError);
+                this.#handleCallbackError(errorHandler, error);
             }
         }
         return true;
@@ -222,9 +244,6 @@ export class Task {
     /** 派发此任务的同步和异步回调；已启动的异步工作不会被取消。 */
     dispatch(): void {
         this.dispatchAsyncCallbacks();
-        // 保持同步回调在本次派发中执行；这里不等待异步回调完成。
-        new Promise((resolve) => {
-            resolve(this.runSyncCallbacks());
-        });
+        this.runSyncCallbacks();
     }
 }

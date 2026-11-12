@@ -1,4 +1,4 @@
-import { Task, TaskScheduler } from './sdk/src/index.js';
+import { SchedulingType, Task, TaskScheduler } from './sdk/src/index.js';
 
 /** 输出带本地时间戳的 demo 日志。 */
 const log = (message: string): void => {
@@ -20,6 +20,7 @@ function main(): void {
     const storeScheduler = new TaskScheduler(500);
     const backOfficeScheduler = new TaskScheduler(1000);
     const controlScheduler = new TaskScheduler(250);
+    const timingWheelScheduler = new TaskScheduler(1000, SchedulingType.TimingWheel);
     /** 待控制任务检查并派发的一次性事件队列。 */
     const pendingActions: ScheduledAction[] = [];
 
@@ -50,6 +51,25 @@ function main(): void {
         { arguments: [] }
     );
     controlScheduler.addTask(timeoutTask, 250);
+
+    // 时间轮演示：用不同周期任务观察下一次到期时间及实际触发间隔。
+    const timingWheelStartedAt = Date.now();
+    [700, 1200].forEach((intervalMs) => {
+        const task = new Task(`timing-wheel-${intervalMs}`, `时间轮 ${intervalMs}ms 周期测试`);
+        let lastRunAt = timingWheelStartedAt;
+        task.bindSyncCallback(
+            (): void => {
+                const now = Date.now();
+                log(
+                    `时间轮测试：目标 ${intervalMs}ms，实测间隔 ${now - lastRunAt}ms，`
+                    + `运行总时长 ${now - timingWheelStartedAt}ms`
+                );
+                lastRunAt = now;
+            },
+            { arguments: [] }
+        );
+        timingWheelScheduler.addTask(task, intervalMs);
+    });
 
     // 门店运营类别：收银台和库存检查属于同一类，每秒一起执行。
     const storeOperationsTask = new Task('store-operations', '门店日常运营');
@@ -87,10 +107,11 @@ function main(): void {
     );
     backOfficeScheduler.addTask(reportingTask, 3000);
 
-    log('咖啡店开始营业，启动门店、后台与控制调度器');
+    log('咖啡店开始营业，启动门店、后台、控制与时间轮测试调度器');
     storeScheduler.resume();
     backOfficeScheduler.resume();
     controlScheduler.resume();
+    timingWheelScheduler.resume();
 
     // 运行五秒后新增 750ms 的设备检查，观察调度器重新校准基础 tick。
     /** 动态注册的设备监控任务；后续移除时使用其 ID 定位。 */
@@ -119,14 +140,16 @@ function main(): void {
     scheduleAction(12000, () => {
         storeScheduler.pause();
         backOfficeScheduler.pause();
-        log('店铺短暂打烊：暂停门店与后台任务派发');
+        timingWheelScheduler.pause();
+        log('店铺短暂打烊：暂停门店、后台与时间轮任务派发');
     });
 
     // 14 秒时恢复业务调度器；暂停期间不补算错过的周期。
     scheduleAction(14000, () => {
         storeScheduler.resume();
         backOfficeScheduler.resume();
-        log('店铺重新营业：恢复门店与后台任务派发');
+        timingWheelScheduler.resume();
+        log('店铺重新营业：恢复门店、后台与时间轮任务派发');
     });
 
     // 16 秒时停止全部调度器，确保 Node.js 进程可以正常退出。
@@ -134,6 +157,7 @@ function main(): void {
         storeScheduler.kill();
         backOfficeScheduler.kill();
         controlScheduler.kill();
+        timingWheelScheduler.kill();
         log('演示结束：停止所有调度器');
     });
 }
