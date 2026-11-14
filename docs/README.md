@@ -94,6 +94,7 @@ new Task(name: string, description: string, existingTaskIds?: Set<TaskId> | null
 | `name` | `string` | 任务名称，只读。 |
 | `description` | `string` | 任务描述，只读。 |
 | `id` | `TaskId` | 任务 ID，只读。 |
+| `deathTime` | `number` | 可读写的剩余存活时间（毫秒）；默认 `Infinity`。赋值非负安全整数会从赋值时刻重新倒计时；`Infinity` 表示永不过期。 |
 | `syncCallbacks` | `ReadonlyArray<(...args: any[]) => any>` | 已绑定同步回调的只读快照。 |
 | `syncArguments` | `ReadonlyArray<ReadonlyArray<any>>` | 同步回调实参的只读快照；内层实参数组也会复制。 |
 | `syncThisArgs` | `ReadonlyArray<unknown>` | 同步回调 `this` 接收者的只读快照。 |
@@ -103,7 +104,15 @@ new Task(name: string, description: string, existingTaskIds?: Set<TaskId> | null
 | `asyncThisArgs` | `ReadonlyArray<unknown>` | 异步回调 `this` 接收者的只读快照。 |
 | `asyncErrorHandlers` | `ReadonlyArray<(error: Error) => void>` | 异步回调错误处理器的只读快照。 |
 
-上述属性仅提供 getter，返回的都是快照；修改快照不会影响任务内部状态。使用 `bindSyncCallback()` 和 `bindAsyncCallback()` 注册回调，使用 `removeSyncCallback()` 和 `removeAsyncCallback()` 按索引安全移除回调及其配套数据。
+同步和异步回调属性仅提供 getter，返回的都是快照；修改快照不会影响任务内部状态。`deathTime` getter 返回剩余毫秒数，到期后为 `0`；setter 仅接受非负安全整数或 `Infinity`。到期检测独立于调度算法，并在调度器暂停或 `kill()` 后继续；各调度器独立移除自己的注册。事件循环阻塞会推迟清理，且已经开始执行的回调不会被取消；到期计时器不会单独阻止 Node.js 进程退出。
+
+```ts
+task.deathTime = 5000; // 5 秒后过期
+console.log(task.deathTime); // 当前剩余毫秒数
+task.deathTime = Infinity; // 恢复为永不过期
+```
+
+使用 `bindSyncCallback()` 和 `bindAsyncCallback()` 注册回调，使用 `removeSyncCallback()` 和 `removeAsyncCallback()` 按索引安全移除回调及其配套数据。
 
 ### `TaskOptions`
 
@@ -181,7 +190,7 @@ task.bindAsyncCallback(
 
 ## `TaskScheduler`
 
-按毫秒间隔派发任务。多个任务可以注册在同一个间隔。调度器支持两种调度模式，由 `SchedulingType` 指定。
+按毫秒间隔派发任务。多个任务可以注册在同一个间隔。调度器支持三种调度模式，由 `SchedulingType` 指定；默认使用时间轮。
 
 ### 构造函数
 
@@ -189,27 +198,41 @@ task.bindAsyncCallback(
 new TaskScheduler(baseIntervalMs?: number, schedulingType?: SchedulingType)
 ```
 
-- `baseIntervalMs`：初始基础 tick，默认 `1000` 毫秒。也作为 `addTask()` 省略间隔时的默认值。构造函数不校验该值。
-- `schedulingType`：调度模式，默认 `SchedulingType.LeastCommonMultiple`。
+- `baseIntervalMs`：默认任务间隔，默认 `1000` 毫秒；GCD 模式也将其作为初始 tick。必须为正安全整数，否则构造函数抛出 `RangeError`。省略 `addTask()` 的间隔时使用策略当前默认间隔。
+- `schedulingType`：调度模式，默认 `SchedulingType.TimingWheel`；不支持的算法会抛出 `RangeError`。
 
 | 模式 | 说明 |
 |---|---|
-| `SchedulingType.LeastCommonMultiple` | 累计模式。根据基础 tick 与任务间隔的最大公约数选择 tick；新增间隔后重新校准，并重置已累计时间。 |
-| `SchedulingType.TimingWheel` | 时间轮模式。根据任务的剩余间隔安排一次性计时器；最近的间隔到期后再安排下一次计时。 |
+| `SchedulingType.LeastCommonMultiple` | GCD tick 模式。根据基础间隔和任务周期的最大公约数选择重复 tick，并用单调时钟检查独立调度组的截止时间；迟到时合并已错过的周期。 |
+| `SchedulingType.TimingWheel` | 时间轮模式。按最近任务组截止时间安排单个一次性计时器；相同周期可拥有独立相位，迟到时保留周期相位并合并错过的周期。 |
+| `SchedulingType.Deadline` | 截止时间调度。按单调时钟上的绝对截止时间使用最小堆选择下一任务，由单个可重排计时器唤醒，并可在目标时刻前最多忙等 1 毫秒；迟到时合并错过的周期，不提供 1 毫秒精度或硬实时保证。 |
 
-调度器初始处于暂停状态。累计模式在构造时创建内部计时器；时间轮模式在恢复且存在任务时才安排计时。完成后调用 `kill()`，避免计时器阻止 Node.js 进程退出。
+调度器初始处于暂停状态；所有模式都只在恢复且存在任务时启动计时。完成后调用 `kill()`，避免计时器阻止 Node.js 进程退出。
+任务周期可以超过 Node.js 单个计时器的最大延迟；策略会在最大计时器延迟处重新检查截止时间，不会因此提前派发。
 
 ### 方法
 
 #### `addTask(task, intervalMs?): TaskId | null`
 
-将任务注册到指定周期。`intervalMs` 以毫秒为单位，必须是正整数；省略时使用当前基础 tick。成功返回任务 ID，无效周期返回 `null`。
+将未过期任务注册到指定周期。`intervalMs` 以毫秒为单位，必须是正安全整数；省略时使用策略当前默认间隔。成功返回任务 ID，周期无效或任务已过期时返回 `null`。
 
 ```ts
 const id = scheduler.addTask(task, 1000);
 ```
 
 同一 `Task` 可被添加到不同周期或调度器。重复添加到相同周期会增加一次该任务的派发。
+
+#### `updateTaskInterval(taskId, newIntervalMs, currentIntervalMs?): boolean`
+
+运行中修改任务周期。新周期必须为正安全整数，并从修改时刻开始计算；被修改的任务会脱离原周期组，原组中的其他任务保持原有相位。省略 `currentIntervalMs` 时，更新该任务在此调度器中的全部注册；提供时仅更新该原周期下的注册。周期无效或未找到任务时返回 `false`。
+
+此 API 仅调整固定周期任务的时间，不会把任务转换为单次超时或固定延时任务。若事件循环阻塞而错过多个周期，恢复后只派发一次，并跳过过期周期。
+
+#### `setSchedulingType(schedulingType): void`
+
+运行中切换此调度器的算法。所有任务注册都会保留，并从切换时刻重新开始周期；切换前已经到期的任务先按旧策略派发。若调度器处于暂停状态，切换后仍保持暂停。传入不支持的算法会抛出 `RangeError`。
+
+每个调度器同一时刻使用一种算法；所有回调仍在 Node.js 主事件循环执行。策略只决定派发时机，不提供 Worker 线程执行。
 
 #### `deleteTaskById(taskId, intervalMs?): boolean`
 
@@ -221,15 +244,15 @@ const id = scheduler.addTask(task, 1000);
 
 #### `deleteTasksByInterval(intervalMs): boolean`
 
-移除指定周期下的全部任务。周期必须为正整数；找到并移除时返回 `true`，否则返回 `false`。
+移除指定周期下的全部任务。周期必须为正安全整数；找到并移除时返回 `true`，否则返回 `false`。
 
 #### `pause(): void`
 
-暂停后续计时处理和任务派发。累计模式暂停期间不累计 tick；时间轮模式会清除待执行的计时器。恢复时不会补发暂停期间错过的周期。已经启动的异步回调不会被取消。
+暂停后续计时处理和任务派发。恢复时会继续剩余时间，不补发暂停期间的周期。已经启动的异步回调不会被取消。
 
 #### `resume(): void`
 
-恢复计时处理和任务派发。调度器初始暂停；调用 `kill()` 停止后，也可以再次调用 `resume()` 重启。时间轮模式会按已记录的最近剩余间隔重新安排计时。
+恢复计时处理和任务派发。调度器初始暂停；调用 `kill()` 停止后，也可以再次调用 `resume()` 重启。所有模式都会按已记录的截止时间重新安排计时。
 
 #### `kill(): void`
 
@@ -241,7 +264,7 @@ const id = scheduler.addTask(task, 1000);
 
 #### `isPositiveInteger(value): boolean`
 
-检查数值是否大于零且为整数。
+检查数值是否为正安全整数。
 
 #### `createIntervalId(intervalMs): IntervalId`
 
@@ -263,7 +286,7 @@ const id = scheduler.addTask(task, 1000);
 
 ## `IntervalAccumulatorMap`
 
-底层工具类，继承自 `Map<number, IntervalId>`，并为间隔维护累计时间或剩余时间。常规调度使用 `TaskScheduler` 即可；直接使用时，应通过扩展方法同步维护时间状态。
+底层兼容工具类，继承自 `Map<number, IntervalId>`，并为间隔维护累计时间或剩余时间。当前 `TaskScheduler` 策略使用独立调度组和单调时钟截止时间；此类主要供直接调用方维护传统累计/剩余时间状态。
 
 ### 构造函数
 
@@ -276,11 +299,11 @@ new IntervalAccumulatorMap(entries?: Iterable<readonly [number, IntervalId]> | n
 ### 方法
 
 - `setWithElapsedTime(intervalMs, intervalId): void`：写入映射并将该间隔的累计时间设为零。
-- `setWithOriginalTime(intervalMs, intervalId): void`：写入映射并将该间隔的剩余时间初始化为其间隔值，供时间轮模式使用。
+- `setWithOriginalTime(intervalMs, intervalId): void`：写入映射并将该间隔的剩余时间初始化为其间隔值。
 - `deleteWithTotalTime(intervalMs): boolean`：删除映射和累计状态；当前实现调用后始终返回 `true`。
 - `advanceElapsedTime(tickIntervalMs): number[]`：为所有已跟踪间隔累加一个 tick，返回本次恰好到期的间隔，并将其累计时间归零。
-- `getMinDiffTime(): number`：返回所有时间轮间隔中的最小剩余时间；没有已跟踪的时间轮间隔时返回 `Infinity`。
-- `advanceOriginalTime(minDelay): number[]`：从所有时间轮间隔的剩余时间中扣除 `minDelay`，返回本次到期的间隔，并将其剩余时间重置为原间隔。
+- `getMinDiffTime(): number`：返回所有剩余时间中的最小值；没有已跟踪的剩余时间时返回 `Infinity`。
+- `advanceOriginalTime(elapsedMs): number[]`：从所有剩余时间中扣除实际经过的 `elapsedMs`，返回到期的间隔，并安排下一周期；超过截止时间时保留周期相位，每次只报告一次到期。
 - `resetElapsedTime(): void`：将所有已跟踪间隔的累计时间归零。
 
 ## 行为说明

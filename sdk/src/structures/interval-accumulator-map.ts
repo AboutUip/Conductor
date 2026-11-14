@@ -1,4 +1,4 @@
-import type { IntervalId } from './task-types.js';
+import type { IntervalId } from '../types/task-types.js';
 
 /** 保存间隔与标识的映射，并为每个间隔累计经过的时间。 */
 export class IntervalAccumulatorMap extends Map<number, IntervalId> {
@@ -59,15 +59,18 @@ export class IntervalAccumulatorMap extends Map<number, IntervalId> {
     }
 
     /**
-     * 为所有差值进行计算下一次tick,返回应该执行Array<Task>的毫秒Delay
+     * 扣除实际经过的时间，并返回到期的间隔。
+     * 若调用晚于截止时间，则保留周期相位，但每次只报告一次到期。
      */
-    advanceOriginalTime(minDelay: number): number[] {
+    advanceOriginalTime(elapsedMs: number): number[] {
         const dueIntervals: number[] = [];
         this.#differenceValue.forEach((differenceMs, intervalMs, differenceValue) => {
-            const updatedElapsedMs: number = differenceMs - minDelay;
-            if (updatedElapsedMs === 0){
+            const updatedElapsedMs: number = differenceMs - elapsedMs;
+            if (updatedElapsedMs <= 0) {
                 dueIntervals.push(intervalMs);
-                differenceValue.set(intervalMs, intervalMs);
+                const overdueMs = -updatedElapsedMs;
+                const nextDelayMs = intervalMs - (overdueMs % intervalMs);
+                differenceValue.set(intervalMs, nextDelayMs);
             }else{
                 differenceValue.set(intervalMs, updatedElapsedMs);
             }

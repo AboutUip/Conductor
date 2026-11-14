@@ -28,10 +28,12 @@ export function isTaskId(value: string): value is TaskId {
     return /^_[0-9a-z]{0,7}$/.test(value);
 }
 
-/** 类型:算法类型 */
+/** 可选的任务调度算法。 */
 export enum SchedulingType{
-    // 累计调度：基础 tick 取任务间隔的最大公约数。
+    // GCD tick 调度：基础 tick 取任务周期的最大公约数。
     LeastCommonMultiple = "LeastCommonMultiple",
     // 时间轮调度。
-    TimingWheel = "TimingWheel"
+    TimingWheel = "TimingWheel",
+    // 截止时间调度：按绝对截止时间派发；采用尽力而为的精度，不提供硬实时保证。
+    Deadline = "Deadline"
 }

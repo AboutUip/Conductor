@@ -1,4 +1,36 @@
-import type { TaskId, TaskOptions } from './task-types.js';
+import type { TaskId, TaskOptions } from '../types/task-types.js';
+
+const deathTimeChangeListeners = new WeakMap<object, Set<WeakRef<() => void>>>();
+
+export function subscribeToTaskDeathTimeChanges(
+    task: object,
+    listener: () => void
+): () => void {
+    let listeners = deathTimeChangeListeners.get(task);
+    if (listeners === undefined) {
+        listeners = new Set();
+        deathTimeChangeListeners.set(task, listeners);
+    }
+
+    const listenerReference = new WeakRef(listener);
+    listeners.add(listenerReference);
+    return () => {
+        listeners.delete(listenerReference);
+        if (listeners.size === 0) deathTimeChangeListeners.delete(task);
+    };
+}
+
+function notifyTaskDeathTimeChanged(task: object): void {
+    const listeners = deathTimeChangeListeners.get(task);
+    if (listeners === undefined) return;
+
+    for (const listenerReference of listeners) {
+        const listener = listenerReference.deref();
+        if (listener === undefined) listeners.delete(listenerReference);
+        else listener();
+    }
+    if (listeners.size === 0) deathTimeChangeListeners.delete(task);
+}
 
 /** 可绑定同步或异步回调，并由调度器触发执行的任务。 */
 export class Task {
@@ -8,6 +40,8 @@ export class Task {
     #id: TaskId;
     /** 任务用途说明。 */
     #description: string;
+    /** 基于单调时钟的任务到期时刻。 */
+    #deathTimeDeadlineMs = Infinity;
     /** 只执行一次的同步回调索引集合。 */
     #syncOnceIndices: Set<number> = new Set();
     /** 只执行一次的异步回调索引集合。 */
@@ -41,6 +75,29 @@ export class Task {
     get id(): TaskId { return this.#id; }
     /** 任务描述。 */
     get description(): string { return this.#description; }
+    /** 剩余存活时间（毫秒）；Infinity 表示永不过期。 */
+    get deathTime(): number {
+        return this.#deathTimeDeadlineMs === Infinity
+            ? Infinity
+            : Math.max(0, this.#deathTimeDeadlineMs - performance.now());
+    }
+    /** 设置剩余存活时长（毫秒）；每次赋值都从当前时刻重新倒计时。 */
+    set deathTime(lifetimeMs: number) {
+        if (
+            lifetimeMs !== Infinity
+            && (!Number.isSafeInteger(lifetimeMs) || lifetimeMs < 0)
+        ) {
+            throw new RangeError('deathTime must be a non-negative safe integer or Infinity.');
+        }
+
+        if (this.#deathTimeDeadlineMs <= performance.now()) {
+            notifyTaskDeathTimeChanged(this);
+        }
+        this.#deathTimeDeadlineMs = lifetimeMs === Infinity
+            ? Infinity
+            : performance.now() + lifetimeMs;
+        notifyTaskDeathTimeChanged(this);
+    }
     /** 已绑定同步回调的只读快照。 */
     get syncCallbacks(): ReadonlyArray<(...args: any[]) => any> { return [...this.#syncCallbacks]; }
     /** 同步回调实参的只读快照，包含复制后的实参数组。 */
